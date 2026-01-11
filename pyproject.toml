@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ntlm-theft"
-version = "0.2.0"
+version = "0.2.1"
 description = "Generate multiple types of NTLMv2 hash theft files for penetration testing"
 readme = "README.md"
 license = {text = "GPL-3.0"}
@@ -51,12 +51,11 @@ Homepage = "https://github.com/Greenwolf/ntlm_theft"
 Repository = "https://github.com/Greenwolf/ntlm_theft"
 Issues = "https://github.com/Greenwolf/ntlm_theft/issues"
 
-[tool.setuptools]
-packages = ["ntlm_theft"]
-include-package-data = true
+[tool.setuptools.packages.find]
+where = ["."]
 
 [tool.setuptools.package-data]
-"*" = ["ntlm_theft/templates/**/*"]
+ntlm_theft = ["templates"]
 
 [tool.ruff]
 line-length = 100

@@ -1,4 +1,4 @@
 include README.md
 include LICENSE
 include requirements.txt
-recursive-include ntlm_theft/templates *
+recursive-include templates *
