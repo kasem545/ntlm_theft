@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ntlm-theft"
+version = "0.1.0"
+description = "A tool for generating multiple types of NTLMv2 hash theft files."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Jacob Wilkin" },
+]
+dependencies = [
+  "xlsxwriter",
+]
+
+[project.optional-dependencies]
+odt = [
+  "ezodf",
+  "lxml",
+]
+dev = [
+  "ruff",
+]
+
+[project.scripts]
+ntlm-theft = "ntlm_theft:main"
+
+[tool.setuptools]
+py-modules = ["ntlm_theft"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["F", "E", "W"]
+ignore = [
+  "E101",
+  "E117",
+  "E501",
+  "W191",
+]
