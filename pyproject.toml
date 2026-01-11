@@ -1,46 +1,67 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ntlm-theft"
-version = "0.1.0"
-description = "A tool for generating multiple types of NTLMv2 hash theft files."
+version = "0.2.0"
+description = "Generate multiple types of NTLMv2 hash theft files for penetration testing"
 readme = "README.md"
-requires-python = ">=3.8"
-license = { file = "LICENSE" }
+license = {text = "GPL-3.0"}
 authors = [
-  { name = "Jacob Wilkin" },
+    {name = "Jacob Wilkin", email = "greenwolf@protonmail.com"}
 ]
+keywords = ["ntlm", "pentest", "security", "redteam", "hash-theft"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+requires-python = ">=3.8"
 dependencies = [
-  "xlsxwriter",
+    "xlsxwriter>=3.0.0",
 ]
 
 [project.optional-dependencies]
 odt = [
-  "ezodf",
-  "lxml",
+    "ezodf>=0.3.0",
+    "lxml>=4.0.0",
 ]
 dev = [
-  "ruff",
+    "ruff>=0.1.0",
+    "pytest>=7.0.0",
 ]
 
 [project.scripts]
 ntlm-theft = "ntlm_theft:main"
+ntlm_theft = "ntlm_theft:main"
+
+[project.urls]
+Homepage = "https://github.com/Greenwolf/ntlm_theft"
+Repository = "https://github.com/Greenwolf/ntlm_theft"
+Issues = "https://github.com/Greenwolf/ntlm_theft/issues"
 
 [tool.setuptools]
 py-modules = ["ntlm_theft"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"*" = ["templates/**/*"]
 
 [tool.ruff]
-line-length = 120
+line-length = 100
 target-version = "py38"
-extend-exclude = [".venv"]
 
 [tool.ruff.lint]
-select = ["F", "E", "W"]
-ignore = [
-  "E101",
-  "E117",
-  "E501",
-  "W191",
-]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = ["E501"]

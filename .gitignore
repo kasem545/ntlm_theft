@@ -1,0 +1,59 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test output directories
+test_output/
+test/
+output/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated attack files (common names)
+*.scf
+*.lnk
+*.rtf
+*.m3u
+*.wax
+*.asx
+*.jnlp
+*.application
+*.library-ms
+*.theme
+Autorun.inf
+desktop.ini
+zoom-attack-instructions.txt
