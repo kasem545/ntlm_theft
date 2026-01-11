@@ -25,6 +25,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
 ]
 requires-python = ">=3.8"
@@ -44,19 +45,17 @@ dev = [
 
 [project.scripts]
 ntlm-theft = "ntlm_theft:main"
-ntlm_theft = "ntlm_theft:main"
 
 [project.urls]
 Homepage = "https://github.com/Greenwolf/ntlm_theft"
 Repository = "https://github.com/Greenwolf/ntlm_theft"
 Issues = "https://github.com/Greenwolf/ntlm_theft/issues"
 
-[tool.setuptools]
-py-modules = ["ntlm_theft"]
-include-package-data = true
+[tool.setuptools.packages.find]
+where = ["."]
 
 [tool.setuptools.package-data]
-"*" = ["templates/**/*"]
+ntlm_theft = ["templates/**/*"]
 
 [tool.ruff]
 line-length = 100
