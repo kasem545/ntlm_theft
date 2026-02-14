@@ -6,6 +6,7 @@ import os
 script_directory = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from ntlm_theft.files.scf import create_scf
+from ntlm_theft.files.bat import create_bat
 from ntlm_theft.files.url import create_url_url, create_url_icon
 from ntlm_theft.files.lnk import create_lnk
 from ntlm_theft.files.rtf import create_rtf
@@ -33,6 +34,7 @@ from ntlm_theft.files.odt import create_odt_ntlm_leak
 __all__ = [
     "script_directory",
     "create_scf",
+    "create_bat",
     "create_url_url",
     "create_url_icon",
     "create_lnk",
