@@ -27,6 +27,8 @@ setup(
     python_requires=">=3.6",
     install_requires=[
         "xlsxwriter",
+        "lxml",
+        "ezodf",
     ],
     entry_points={
         "console_scripts": [
